@@ -1,0 +1,11 @@
+{
+  "folders": [
+    {
+      "name": "Deferred Compaction",
+      "path": "."
+    }
+  ],
+  "settings": {
+    "typescript.tsdk": "node_modules/typescript/lib"
+  }
+}

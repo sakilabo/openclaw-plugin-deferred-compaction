@@ -1,0 +1,58 @@
+name: Publish to ClawHub
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: clawhub-publish
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    name: Build, validate, and publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: clawhub-publish
+    env:
+      CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7.0.0
+        with:
+          node-version: "24"
+          check-latest: true
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Validate package
+        run: npx --yes clawhub@latest package validate . --openclaw-version 2026.9.4 --json
+
+      - name: Pack plugin
+        id: pack
+        shell: bash
+        run: |
+          archive="$(npm pack --json | node -e "let data='';process.stdin.on('data',c=>data+=c).on('end',()=>process.stdout.write(JSON.parse(data)[0].filename))")"
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate initial publication
+        if: ${{ env.CLAWHUB_TOKEN != '' }}
+        run: npx --yes clawhub@latest login --token "$CLAWHUB_TOKEN"
+
+      - name: Publish package
+        run: npx --yes clawhub@latest package publish "${{ steps.pack.outputs.archive }}" --family code-plugin --wait --json

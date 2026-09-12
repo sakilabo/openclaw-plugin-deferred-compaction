@@ -1,0 +1,66 @@
+{
+  "id": "deferred-compaction",
+  "name": "Deferred Compaction",
+  "description": "Schedules Codex-backed session compaction after the current agent turn ends.",
+  "requiresPlugins": [
+    "codex"
+  ],
+  "contracts": {
+    "tools": [
+      "compact_context_after_turn"
+    ]
+  },
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "delayMs": {
+        "type": "integer",
+        "minimum": 0,
+        "default": 1500
+      },
+      "idleWaitMs": {
+        "type": "integer",
+        "minimum": 0,
+        "default": 10000
+      },
+      "postTurnIdleWaitMs": {
+        "type": "integer",
+        "minimum": 0,
+        "default": 15000
+      },
+      "idlePollMs": {
+        "type": "integer",
+        "minimum": 100,
+        "default": 1000
+      },
+      "compactAttempts": {
+        "type": "integer",
+        "minimum": 1,
+        "default": 3
+      },
+      "logLevel": {
+        "type": "string",
+        "enum": [
+          "debug",
+          "info",
+          "error"
+        ],
+        "default": "info"
+      },
+      "logFile": {
+        "type": "string",
+        "default": "logs/deferred-compaction.log"
+      },
+      "maxLogLines": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 500,
+        "default": 500
+      }
+    }
+  }
+}
