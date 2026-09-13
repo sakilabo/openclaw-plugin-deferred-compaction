@@ -55,4 +55,9 @@ jobs:
         run: npx --yes clawhub@latest login --token "$CLAWHUB_TOKEN"
 
       - name: Publish package
-        run: npx --yes clawhub@latest package publish "${{ steps.pack.outputs.archive }}" --family code-plugin --wait --json
+        run: >-
+          npx --yes clawhub@latest package publish "${{ steps.pack.outputs.archive }}"
+          --family code-plugin
+          --source-repo "${{ github.repository }}"
+          --source-commit "${{ github.sha }}"
+          --wait --json
