@@ -1,6 +1,6 @@
 {
   "name": "openclaw-plugin-deferred-compaction",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "description": "OpenClaw tool that compacts the current Codex-backed session after the active turn ends.",
@@ -8,6 +8,7 @@
     "dist/",
     "openclaw.plugin.json",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "scripts": {
