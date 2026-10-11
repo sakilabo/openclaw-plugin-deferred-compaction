@@ -1,3 +1,4 @@
+import { CLI_STARTUP_IMPORT } from "./cli-startup.js";
 import { existsSync } from "node:fs";
 import { appendFile, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
@@ -234,7 +235,7 @@ function getTokenSnapshot(api: OpenClawPluginApi, agentId: string, sessionKey: s
 async function runOpenClawCli(args: string[], timeoutMs: number): Promise<{ stdout: string; stderr: string }> {
   const cliEntry = process.argv[1];
   if (!cliEntry) throw new Error("The OpenClaw CLI entry point is unavailable.");
-  return await execFileAsync(process.execPath, [cliEntry, ...args], {
+  return await execFileAsync(process.execPath, ["--import", CLI_STARTUP_IMPORT, cliEntry, ...args], {
     timeout: timeoutMs,
     windowsHide: true,
     maxBuffer: 1024 * 1024,
