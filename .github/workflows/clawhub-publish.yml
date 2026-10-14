@@ -62,7 +62,7 @@ jobs:
         run: npm test
 
       - name: Validate package
-        run: npx --yes clawhub@latest package validate . --openclaw-version 2026.9.4 --json
+        run: npx --yes clawhub@latest package validate . --openclaw-version 2026.10.3 --json
 
       - name: Pack plugin
         id: pack

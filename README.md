@@ -2,7 +2,7 @@
 
 **This plugin lets an OpenClaw agent compact its own context.**
 
-It adds a `compact_context_after_turn` tool to OpenClaw agents running on the Codex harness. When an agent calls the tool, the plugin compacts the context of the same session after the current turn ends.
+It adds a `compact_context_after_turn` tool to OpenClaw agents running on the Codex harness. When an agent calls the tool, the plugin compacts the context of the same session after the current turn ends. It also adds `request_context_compaction`, which lets automation such as a cron trigger ask a session to compact its context.
 
 The central problem this plugin solves is not when or how often compaction runs. **By default, an agent cannot execute context compaction itself.** Giving the agent that ability enables workflows such as:
 
@@ -14,31 +14,23 @@ The central problem this plugin solves is not when or how often compaction runs.
 
 ## Supported versions and requirements
 
-- Tested with OpenClaw `2026.9.4`
-- Tested with `@openclaw/codex@2026.9.4`
+- Tested with OpenClaw `2026.10.3`
+- Tested with `@openclaw/codex@2026.10.3`
 - Supports sessions where `session_windows.agent_harness_id = 'codex'`
 - Does not support sessions using other harnesses
 - Other versions have not been tested
 
-This plugin depends on internal OpenClaw and Codex plugin implementation details. Compatibility must therefore be checked after updating OpenClaw or `@openclaw/codex`. In particular, it uses the disposer symbol on `globalThis`, the `session_windows` and `cron_run_receipts` schemas, the agent and state directory layouts, and the `sessions.compact` and `chat.send` Gateway RPC methods.
+This plugin depends on internal OpenClaw and Codex plugin implementation details. Compatibility must therefore be checked after updating OpenClaw or `@openclaw/codex`. In particular, it uses the disposer symbol on `globalThis`, the `session_windows` and `cron_run_receipts` schemas, the agent and state directory layouts, the `sessions.compact` and `chat.send` Gateway RPC methods, and the `openclaw message send` CLI command.
 
 ## Why this plugin is needed
 
-### Problem 1: Agents cannot execute compaction
+### Agents cannot execute compaction
 
 OpenClaw provides `/codex compact` for users to enter. However, it is a chat command, not a tool that an agent can call. The `openclaw sessions compact` CLI command is likewise not exposed as a context-compaction tool for agents.
 
 Consequently, a standard agent may determine that it has not compacted today or that its context has grown too large, but it still cannot perform the compaction itself. Writing an automatic-execution rule or instruction is not enough; the agent needs an actual compaction tool that it can call.
 
 This plugin fills that gap by adding `compact_context_after_turn`.
-
-### Problem 2: Users cannot tell when manual compaction will succeed
-
-As an alternative to automatic execution by the agent, a user could run `/codex compact` manually. At present, however, even that cannot be executed reliably.
-
-For a Codex-harness session, compaction is handled by the Codex app server's `thread/compact/start`, not by OpenClaw itself. Compaction succeeds only while the Codex app server does not hold the thread writer. Because the connection that executed a turn continues to hold the writer after the turn ends, users cannot tell when `/codex compact` will succeed.
-
-This is a problem in the current integration between OpenClaw and the Codex harness and may be fixed in the future. This plugin also works around the current problem by releasing the connection before compaction.
 
 ## How it works
 
@@ -55,6 +47,34 @@ When the agent calls `compact_context_after_turn`, the plugin performs the follo
 All waiting is designed to occur within the turn. Once `agent_end` has fired, the turn is already over and the plugin cannot wait indefinitely; a conflict at that point is treated as a failed attempt.
 
 Reservation state is shared in process memory through `globalThis`. Reservations are shared even if OpenClaw loads the plugin as multiple registration instances, and they are discarded automatically when the Gateway restarts. They are not persisted to a file or database.
+
+## Requesting compaction from automation
+
+`request_context_compaction` sends a message to another session as a new turn through `chat.send`. The message should tell that session to call `compact_context_after_turn`. The tool returns as soon as the request is accepted, and the plugin delivers it in the Gateway process afterwards. Cron trigger scripts call tools as global functions, so a trigger can request compaction within its evaluation budget without starting a process of its own.
+
+| Parameter | Required | Description |
+| --- | --- | --- |
+| `agentId` | Yes | Agent that owns the target session |
+| `sessionKey` | Yes | Session to compact |
+| `message` | Yes | Message delivered to the session |
+| `idempotencyKey` | No | Key that deduplicates repeated requests; a random key is used when omitted |
+| `failureChannel`, `failureTarget` | No | Destination of a failure notice sent through `openclaw message send`; give both or neither |
+| `failureMessage` | No | Text placed before the failure reason in the notice |
+
+The tool returns `{ accepted: true, agentId, sessionKey, idempotencyKey }`. A delivery failure is logged as `compaction_request_failed` with the CLI exit code, signal, standard output, and standard error, and is sent as the failure notice when a destination is given.
+
+The tool is registered as optional, so it is available only to agents whose tool policy allows it explicitly, for example through `tools.alsoAllow`.
+
+Example trigger script fragment:
+
+```js
+const result = await request_context_compaction({
+  agentId: "ops",
+  sessionKey: "agent:ops:main",
+  message: "Save anything that must survive, then call compact_context_after_turn.",
+  idempotencyKey: `idle-${trigger.state?.idleSince}`,
+});
+```
 
 ## Session notifications
 
@@ -80,7 +100,7 @@ When overlapping runs exist, the following lines are appended to the completion 
 
 ```
 1 scheduled job ran while compaction was running:
-- job 2eb04408-e4ff-4ac7-8292-1da118e3db31: ok
+- job 01234567-89ab-cdef-0123-456789abcdef: ok
 Confirm that compaction caused no problem for it before resuming your work.
 ```
 
@@ -94,27 +114,25 @@ Completion and failure messages are sent through the Gateway RPC method `chat.se
 
 The plugin uses `chat.send` rather than `sessions.send` because `sessions.send` cannot carry a delivery option. It delegates a fixed set of parameters to `chat.send`; without `deliver`, the reply is routed to the internal message channel. The turn still runs, but the response reaches only Gateway subscribers such as Control UI and is not delivered to an external channel. With `deliver: true`, OpenClaw resolves the destination from the session's own delivery context, keeping the plugin independent of any particular channel type. Sessions without an external route, including Control UI and WebChat sessions, continue to record the response only in the transcript. Because `chat.send` requires an `idempotencyKey`, the plugin generates a UUID for every send.
 
-A notification is always sent after failure as well. Otherwise, an agent instructed to wait for the next notification would wait indefinitely. The failure message prevents automatic retries. This is the only notification route; the plugin does not send a separate direct message to the user.
+A notification is always sent after failure as well. Otherwise, an agent instructed to wait for the next notification would wait indefinitely. The failure message prevents automatic retries. This is the only notification route for compaction results; the plugin does not send a separate direct message to the user about them.
 
 ## Causes of compaction failure and how they are handled
 
-`openclaw sessions compact` calls the Gateway RPC method `sessions.compact`. For a Codex-harness session, this goes through the Codex app server's `thread/resume`. If the app-server connection that ran the turn still holds the thread, the resume fails with `thread-store conflict: thread <id> already has an active writer`. The writer can remain held for up to 30 minutes (`CODEX_APP_SERVER_LIVE_THREAD_IDLE_TIMEOUT_MS`), so compaction immediately after a turn always fails.
-
-Before compaction, the plugin therefore calls the disposer exposed by the Codex plugin on `globalThis`: `Symbol.for("openclaw.codexAppServerClientDisposer@<version>")`, whose implementation is `clearSharedCodexAppServerClientAndWait`. This is the same function used by the Codex harness during disposal. It closes the shared app-server client and waits for the process to exit.
+Before compaction, the plugin calls the disposer exposed by the Codex plugin on `globalThis`: `Symbol.for("openclaw.codexAppServerClientDisposer@<version>")`, whose implementation is `clearSharedCodexAppServerClientAndWait`. This is the same function used by the Codex harness during disposal. It closes the shared app-server client and waits for the process to exit.
 
 Because this releases the Codex connections for every agent, the plugin performs the following read-only check first to avoid interrupting active turns:
 
-- No session other than the compaction target has both `agent_harness_id = 'codex'` and `status = 'running'` in the `session_windows` table of any agent's `agents\<id>\agent\openclaw-agent.sqlite` database.
+- No session other than the compaction target has both `agent_harness_id = 'codex'` and `status = 'running'` in the `session_windows` table of any agent's `agents/<id>/agent/openclaw-agent.sqlite` database.
 
 Agents are enumerated with `listAgentIds()`. It returns the default agent ID when `agents.entries` is empty, so no specific agent ID needs to be added as a fallback.
 
-The disposer waits for the app-server process to exit, so the release is complete when it returns. Files matching `agents\<id>\agent\codex-home\thread-writer-locks\*.lock` are listed in the logs before and after release but are not used for the decision. A stale file may remain after a forced termination, so its presence does not prove that a writer is active.
+The disposer waits for the app-server process to exit, so the release is complete when it returns. Files matching `agents/<id>/agent/codex-home/thread-writer-locks/*.lock` are listed in the logs before and after release but are not used for the decision. A stale file may remain after a forced termination, so its presence does not prove that a writer is active.
 
 The `status` column represents whether a run is alive. OpenClaw writes `running` together with `startedAt` when accepting a run, then changes it to `done` together with `endedAt` and `runtimeMs` when the run ends. The status column is therefore sufficient for the activity check.
 
 The plugin checks for idle sessions every `idlePollMs` (one second by default). Each compaction retry, controlled by `compactAttempts` (three by default), restarts from the same state check and uses `idlePollMs` as its interval. A retry checks immediately without waiting; if another Codex session is active, the attempt fails at that point.
 
-Compaction itself takes approximately one minute. In one measurement, completion occurred about 80 seconds after `agent_end`: releasing the connection took 0.1 seconds and `sessions compact` took approximately 67 seconds. This is why the tool result tells the agent to expect one to two minutes.
+Compaction itself takes approximately one minute; completion has been observed about one minute after the turn ended. This is why the tool result tells the agent to expect one to two minutes.
 
 If another message enters the session queue during compaction, `sessions.compact` rejects the operation with `Session <key> has queued work; retry after it finishes.` The plugin can ask the agent to wait, but it cannot prevent a user from sending another message, so this failure remains possible.
 
@@ -149,7 +167,7 @@ npm run build
 
 The default log file is `logs/deferred-compaction.log`. It uses JSON Lines format and is always truncated to the latest 500 lines. `logLevel` accepts `debug`, `info`, or `error` and defaults to `info`.
 
-At `info`, the plugin records reservations (`compaction_scheduled`), completions (`compaction_completed`), failures (`compaction_failed`), notification failures (`session_message_failed`), and overlapping job runs (`compaction_window_jobs`, only when at least one exists). If reading job receipts fails, it records `compaction_window_jobs_failed`. At `debug`, it additionally records `agent_end` receipt and reservation matching, activity checks for other sessions, lock-file lists before and after connection release, every compaction attempt, session-notification sends, and overlap checks with no matching runs.
+At `info`, the plugin records reservations (`compaction_scheduled`), completions (`compaction_completed`), failures (`compaction_failed`), notification failures (`session_message_failed`), compaction requests (`compaction_request_accepted`, `compaction_request_delivered`, `compaction_request_failed`, and the failure-notice results), and overlapping job runs (`compaction_window_jobs`, only when at least one exists). If reading job receipts fails, it records `compaction_window_jobs_failed`. At `debug`, it additionally records `agent_end` receipt and reservation matching, activity checks for other sessions, lock-file lists before and after connection release, every compaction attempt, session-notification sends, and overlap checks with no matching runs.
 
 ## OpenClaw configuration
 
@@ -181,3 +199,11 @@ Example:
 ## License
 
 UPL 1.0 (`UPL-1.0`). See [LICENSE](./LICENSE) for details.
+
+## CLI startup acceleration
+
+The plugin implements startup acceleration for its own OpenClaw CLI subprocesses. It avoids repeated plugin capture and SQLite integrity work, and propagates the implementation to runtime workers. The implementation is compiled into `dist/cli-startup.js` and supplied to Node as an in-memory module. It does not depend on a machine-local patch file or inherit the Gateway's startup hooks. Compaction, outcome notifications, compaction requests, and failure notices use this same startup path. Recheck these internal OpenClaw transformations when upgrading OpenClaw.
+
+The same hook removes OpenClaw's configured-MCP diagnostic notice generator. Tool omissions and startup discovery diagnostics do not create model instructions or reject automation saves through `diagnosticNotice`. No replacement prompt is added; tool execution and its results are unchanged.
+
+Validation: `npm run build` and `node --test tests/cli-startup.test.mjs`.
