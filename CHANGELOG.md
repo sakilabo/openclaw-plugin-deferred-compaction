@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1 — 2026-10-14
+
+### Fixed
+
+- Tell the agent that the session will be unavailable for a few minutes while compaction runs, instead of one to two minutes.
+
 ## 0.2.0 — 2026-10-14
 
 ### Added
