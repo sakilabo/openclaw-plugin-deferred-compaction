@@ -25,7 +25,7 @@ const STATE_SQLITE_RELATIVE_PATH = ["state", "openclaw.sqlite"] as const;
 /** A skipped receipt means the trigger condition did not hold, so no run competed with compaction. */
 const NON_RUNNING_CRON_RECEIPT_STATUS = "skipped";
 const CODEX_CLIENT_DISPOSER_SYMBOL = "openclaw.codexAppServerClientDisposer";
-const SCHEDULED_TOOL_MESSAGE = "Session compaction is reserved. Tell the user to wait: this session will be unavailable for one to two minutes, until compaction finishes.";
+const SCHEDULED_TOOL_MESSAGE = "Session compaction is reserved. Tell the user to wait: this session will be unavailable for a few minutes, until compaction finishes.";
 
 /** Renders the compaction outcome so the session does not have to look the numbers up itself. */
 function formatTokenChange(tokens: { before?: number; after?: number; contextWindow?: number }): string | undefined {

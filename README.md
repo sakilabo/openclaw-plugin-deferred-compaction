@@ -82,7 +82,7 @@ Because compaction runs after the turn ends, the agent cannot continue without l
 
 | Event | Recipient | Message |
 | --- | --- | --- |
-| Reserved (tool result) | Agent | Session compaction is reserved. Tell the user to wait: this session will be unavailable for one to two minutes, until compaction finishes. |
+| Reserved (tool result) | Agent | Session compaction is reserved. Tell the user to wait: this session will be unavailable for a few minutes, until compaction finishes. |
 | Completed | Session | Session compaction finished.<br>Context tokens: 58352 -> 28436 of 258400. |
 | Failed | Session | Session compaction failed. Reason: …<br>The context is left uncompacted.<br>Do not run compaction again. |
 
@@ -132,7 +132,7 @@ The `status` column represents whether a run is alive. OpenClaw writes `running`
 
 The plugin checks for idle sessions every `idlePollMs` (one second by default). Each compaction retry, controlled by `compactAttempts` (three by default), restarts from the same state check and uses `idlePollMs` as its interval. A retry checks immediately without waiting; if another Codex session is active, the attempt fails at that point.
 
-Compaction itself takes approximately one minute; completion has been observed about one minute after the turn ended. This is why the tool result tells the agent to expect one to two minutes.
+Compaction can take a few minutes, so the tool result tells the agent that the session will be unavailable for a few minutes.
 
 If another message enters the session queue during compaction, `sessions.compact` rejects the operation with `Session <key> has queued work; retry after it finishes.` The plugin can ask the agent to wait, but it cannot prevent a user from sending another message, so this failure remains possible.
 
