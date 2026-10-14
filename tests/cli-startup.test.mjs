@@ -20,6 +20,14 @@ test('worker inherits the same implementation', () => {
   const args = vm.runInNewContext(source + '; resolveRuntimeWorkerThreadExecArgv()');
   assert.deepEqual(Array.from(args), ['--no-warnings', '--import', CLI_STARTUP_IMPORT]);
 });
+test('older SQLite workers retain the startup import', () => {
+  const source = 'function workerArgs(p) { return p.carrierUrl.pathname.endsWith(".ts") ? ["--import", import.meta.resolve("tsx/esm")] : []; }';
+  const patched = transform(source).replaceAll('import.meta.resolve', 'resolveSpecifier');
+  for (const pathname of ['/worker.js', '/worker.ts']) {
+    const args = vm.runInNewContext(patched + '; workerArgs({carrierUrl:{pathname}})', { pathname, resolveSpecifier: value => value });
+    assert.deepEqual(Array.from(args), [...(pathname.endsWith('.ts') ? ['--import', 'tsx/esm'] : []), '--import', CLI_STARTUP_IMPORT]);
+  }
+});
 test('plugin loader avoids duplicating non bundled plugins', () => {
   const source = 'function check(p) { if (p.origin === "bundled" && ready(p.source)) { if (p.expectedSourceDigest !== void 0) throw Error("Source digest validation is not applicable to core-bundled runtime modules"); return true; } return false; }';
   const patched = transform(source);
@@ -38,6 +46,18 @@ test('non bundled source digests work on the accelerated path', () => {
   const patched = transform(source);
   assert.equal(vm.runInNewContext(patched + '; check({origin:"external",source:"x",expectedSourceDigest:"digest"})', { ready: () => true }), true);
   assert.throws(() => vm.runInNewContext(patched + '; check({origin:"bundled",source:"x",expectedSourceDigest:"digest"})', { ready: () => true }), /core-bundled/);
+});
+
+test('current loader accelerates JavaScript plugins and preserves TypeScript loading', () => {
+  const source = 'function check(p) { if (p.origin === "bundled") { if (p.expectedSourceDigest !== void 0) throw Error("Source digest validation is not applicable to core-bundled runtime modules"); return "direct"; } return "capture"; }';
+  const patched = transform(source);
+  for (const extension of ['js', 'mjs', 'cjs']) {
+    assert.equal(vm.runInNewContext(patched + '; check(input)', { input: { origin: 'external', source: `plugin.${extension}`, expectedSourceDigest: 'digest' } }), 'direct');
+  }
+  assert.equal(vm.runInNewContext(patched + '; check({origin:"external",source:"plugin.ts"})'), 'capture');
+  assert.equal(vm.runInNewContext(patched + '; check({origin:"bundled",source:"plugin.ts"})'), 'direct');
+  assert.throws(() => vm.runInNewContext(patched + '; check({origin:"bundled",source:"plugin.js",expectedSourceDigest:"digest"})'), /core-bundled/);
+  assert.equal(transform(patched), patched);
 });
 
 
