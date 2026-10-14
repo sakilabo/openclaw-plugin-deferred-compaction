@@ -15,6 +15,8 @@ import {
 } from "openclaw/plugin-sdk/plugin-entry";
 
 const TOOL_NAME = "compact_context_after_turn";
+const REQUEST_TOOL_NAME = "request_context_compaction";
+const ACCEPTED_CHAT_SEND_STATUSES = ["started", "in_flight", "ok"];
 const CODEX_HARNESS_ID = "codex";
 const CODEX_HOME_DIRNAME = "codex-home";
 const THREAD_WRITER_LOCK_DIRNAME = "thread-writer-locks";
@@ -121,6 +123,21 @@ type BusyCodexSession = {
 type ThreadWriterLock = {
   agentId: string;
   lockFile: string;
+};
+
+type SessionTarget = {
+  agentId: string;
+  sessionKey: string;
+};
+
+type CompactionRequest = SessionTarget & {
+  message: string;
+  idempotencyKey: string;
+  failureNotice?: {
+    channel: string;
+    target: string;
+    message: string;
+  };
 };
 
 type RuntimeState = {
@@ -501,6 +518,22 @@ async function runCompactCommand(
   return { failure: [stdout, stderr, failure].filter(Boolean).join(" ") || "unknown error" };
 }
 
+async function callChatSend(target: SessionTarget, message: string, idempotencyKey: string, timeoutMs: number): Promise<string> {
+  const { stdout } = await runOpenClawCli([
+    "gateway", "call", "chat.send",
+    "--params", JSON.stringify({
+      sessionKey: target.sessionKey,
+      agentId: target.agentId,
+      message,
+      deliver: true,
+      idempotencyKey,
+    }),
+    "--json",
+    "--timeout", "30000",
+  ], timeoutMs);
+  return stdout;
+}
+
 /**
  * Wakes the session that reserved the compaction. The in-process
  * `dispatchGatewayMethod` is reserved for authenticated plugin HTTP routes, so the
@@ -522,18 +555,7 @@ async function sendSessionMessage(api: OpenClawPluginApi, config: PluginConfig, 
     sessionKey: request.sessionKey,
     outcome,
   });
-  const { stdout } = await runOpenClawCli([
-    "gateway", "call", "chat.send",
-    "--params", JSON.stringify({
-      sessionKey: request.sessionKey,
-      agentId: request.agentId,
-      message,
-      deliver: true,
-      idempotencyKey: randomUUID(),
-    }),
-    "--json",
-    "--timeout", "30000",
-  ], 40_000);
+  const stdout = await callChatSend(request, message, randomUUID(), 40_000);
   await logLine(api, config, {
     level: "debug",
     event: "session_message_completed",
@@ -542,6 +564,107 @@ async function sendSessionMessage(api: OpenClawPluginApi, config: PluginConfig, 
     outcome,
     response: stdout.trim().slice(0, 500) || undefined,
   });
+}
+
+/** Reports what the CLI said. The execFile error message starts with the whole command line, which hides it. */
+function describeCliFailure(error: unknown): string {
+  const record = asRecord(error);
+  const parts = [
+    typeof record?.code === "number" ? `exit code ${record.code}` : undefined,
+    typeof record?.signal === "string" ? `signal ${record.signal}` : undefined,
+    String(record?.stdout ?? "").trim() || undefined,
+    String(record?.stderr ?? "").trim() || undefined,
+  ].filter((part): part is string => part !== undefined);
+  return parts.length > 0 ? parts.join("\n") : errorText(error);
+}
+
+/**
+ * Delivers a compaction request to its session. It runs in the Gateway process after the tool
+ * has returned, so a caller with a short budget, such as a cron trigger, does not wait for the
+ * OpenClaw CLI to start.
+ */
+async function deliverCompactionRequest(api: OpenClawPluginApi, config: PluginConfig, request: CompactionRequest): Promise<void> {
+  try {
+    const stdout = await callChatSend(request, request.message, request.idempotencyKey, 120_000);
+    const status = asRecord(JSON.parse(stdout) as unknown)?.status;
+    if (typeof status !== "string" || !ACCEPTED_CHAT_SEND_STATUSES.includes(status)) {
+      throw new Error(`Unexpected chat.send response: ${stdout.trim().slice(0, 500)}`);
+    }
+    await logLine(api, config, {
+      level: "info",
+      event: "compaction_request_delivered",
+      agentId: request.agentId,
+      sessionKey: request.sessionKey,
+      idempotencyKey: request.idempotencyKey,
+      status,
+    });
+  } catch (error) {
+    const reason = describeCliFailure(error);
+    api.logger.error(`Failed to deliver the compaction request to ${request.sessionKey}: ${reason}`);
+    await logLine(api, config, {
+      level: "error",
+      event: "compaction_request_failed",
+      agentId: request.agentId,
+      sessionKey: request.sessionKey,
+      idempotencyKey: request.idempotencyKey,
+      error: reason,
+    });
+    if (!request.failureNotice) return;
+    const notice = request.failureNotice;
+    try {
+      await runOpenClawCli([
+        "message", "send",
+        "--channel", notice.channel,
+        "--target", notice.target,
+        "--message", `${notice.message}${reason}`,
+        "--json",
+      ], 120_000);
+      await logLine(api, config, {
+        level: "info",
+        event: "compaction_request_failure_notice_sent",
+        sessionKey: request.sessionKey,
+        channel: notice.channel,
+        target: notice.target,
+      });
+    } catch (noticeError) {
+      await logLine(api, config, {
+        level: "error",
+        event: "compaction_request_failure_notice_failed",
+        sessionKey: request.sessionKey,
+        channel: notice.channel,
+        target: notice.target,
+        error: describeCliFailure(noticeError),
+      });
+    }
+  }
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function compactionRequestFromParams(params: unknown): CompactionRequest {
+  const raw = asRecord(params) ?? {};
+  const agentId = optionalString(raw.agentId);
+  const sessionKey = optionalString(raw.sessionKey);
+  const message = optionalString(raw.message);
+  if (!agentId || !sessionKey || !message) throw new Error("agentId, sessionKey and message are required.");
+  const failureChannel = optionalString(raw.failureChannel);
+  const failureTarget = optionalString(raw.failureTarget);
+  if (Boolean(failureChannel) !== Boolean(failureTarget)) throw new Error("failureChannel and failureTarget must be given together.");
+  return {
+    agentId,
+    sessionKey,
+    message,
+    idempotencyKey: optionalString(raw.idempotencyKey) ?? randomUUID(),
+    ...failureChannel && failureTarget ? {
+      failureNotice: {
+        channel: failureChannel,
+        target: failureTarget,
+        message: typeof raw.failureMessage === "string" ? raw.failureMessage : "Session compaction request failed: ",
+      },
+    } : {},
+  };
 }
 
 /** Never lets a missing or changed state store keep the session from being told the compaction ended. */
@@ -773,6 +896,41 @@ export default definePluginEntry({
         };
       },
     }), { name: TOOL_NAME });
+
+    api.registerTool({
+      name: REQUEST_TOOL_NAME,
+      label: "Request Context Compaction",
+      description: "Send a message to a Codex-backed OpenClaw session as a new turn, asking it to compact its context. The message should tell that session to call compact_context_after_turn. Returns once the request is accepted; delivery runs in the background. Intended for automation such as cron trigger scripts.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["agentId", "sessionKey", "message"],
+        properties: {
+          agentId: { type: "string", description: "Agent that owns the target session." },
+          sessionKey: { type: "string", description: "Session to compact." },
+          message: { type: "string", description: "Message delivered to the session." },
+          idempotencyKey: { type: "string", description: "Key that deduplicates repeated requests. A random key is used when omitted." },
+          failureChannel: { type: "string", description: "Channel for a failure notice, used with failureTarget." },
+          failureTarget: { type: "string", description: "Destination for a failure notice, used with failureChannel." },
+          failureMessage: { type: "string", description: "Text placed before the failure reason in the notice." },
+        },
+      },
+      async execute(_id: string, params: unknown) {
+        const request = compactionRequestFromParams(params);
+        await logLine(api, config, {
+          level: "info",
+          event: "compaction_request_accepted",
+          agentId: request.agentId,
+          sessionKey: request.sessionKey,
+          idempotencyKey: request.idempotencyKey,
+        });
+        void deliverCompactionRequest(api, config, request);
+        return {
+          content: [{ type: "text", text: `Compaction request accepted for ${request.sessionKey}.` }],
+          details: { accepted: true, agentId: request.agentId, sessionKey: request.sessionKey, idempotencyKey: request.idempotencyKey },
+        };
+      },
+    }, { name: REQUEST_TOOL_NAME, optional: true });
 
     api.on("agent_end", (_event, ctx) => {
       void logLine(api, config, {

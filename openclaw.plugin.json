@@ -7,8 +7,14 @@
   ],
   "contracts": {
     "tools": [
-      "compact_context_after_turn"
+      "compact_context_after_turn",
+      "request_context_compaction"
     ]
+  },
+  "toolMetadata": {
+    "request_context_compaction": {
+      "optional": true
+    }
   },
   "activation": {
     "onStartup": true
